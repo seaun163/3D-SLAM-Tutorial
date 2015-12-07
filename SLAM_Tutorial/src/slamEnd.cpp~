@@ -1,0 +1,104 @@
+// =====================================================================================
+//
+//       Filename:  slamBase.cpp
+//
+//    Description:
+//
+//        Version:  1.0
+//        Created:  04/12/15 14:13:00
+//       Revision:  none
+//       Compiler:  g++
+//
+//         Author:  Cheng Zhao(Henry) (Univeristy of Birmingham), IRobotCheng@gmail.com
+//        Company:
+//
+// =====================================================================================
+#include <slamBase.h>
+
+int main(int argc, char** argv)
+{
+    cout << "Initializing ..." << endl;
+    ParameterReader PD;
+    int startIndex = atoi(PD.getData( "start_index" ).c_str());
+    int endIndex = atoi(PD.getData( "end_index" ).c_str());
+    string detector = PD.getData("detector");
+    string descriptor = PD.getData("descriptor");
+    CAMERA_INTRINSIC_PARAMETERS camera = getDefaultCamera();
+    int min_inliers = atoi(PD.getData("min_inliers").c_str());
+    double max_norm = atof(PD.getData("max_norm").c_str());
+/*===========================================================================================*/
+    int currIndex = startIndex;
+    int lastIndex = currIndex;
+    FRAME lastFrame = readFrame(currIndex, PD);
+
+    computeKeyPointsAndDesp(lastFrame, detector, descriptor);
+    PointCloud::Ptr cloud = image2PointCloud(lastFrame.rgb, lastFrame.depth, camera);
+/*===========================================================================================*/
+    typedef g2o::BlockSolver_6_3 SlamBlockSolver;
+    typedef g2o::LinearSolverCSparse<SlamBlockSolver::PoseMatrixType> SlamLinearSolver;
+
+    SlamLinearSolver* linearSolver = new SlamLinearSolver();
+    linearSolver->setBlockOrdering(false);
+    SlamBlockSolver* blockSolver = new SlamBlockSolver(linearSolver);
+    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(blockSolver);
+    g2o::SparseOptimizer globalOptimizer;
+    globalOptimizer.setAlgorithm(solver);
+    globalOptimizer.setVerbose(false);
+/*===========================================================================================*/
+    g2o::VertexSE3* v = new g2o::VertexSE3();
+    v->setId(currIndex);
+    v->setEstimate(Eigen::Isometry3d::Identity());
+    v->setFixed(true);
+    globalOptimizer.addVertex(v);
+/*===========================================================================================*/
+    for(currIndex = startIndex + 1; currIndex < endIndex; currIndex++)
+    {
+
+        cout << "Reading files" << currIndex << endl;
+        FRAME currFrame = readFrame(currIndex, PD);
+        computeKeyPointsAndDesp(currFrame, detector, descriptor);
+
+        RESULT_OF_PNP result = estimateMotion(lastFrame, currFrame, camera);
+        if(result.inliers < min_inliers)
+            continue;
+        double norm = normofTransform(result.rvec, result.tvec);
+        cout << "norm = " << norm << endl;
+        if(norm >= max_norm)
+            continue;
+
+        Eigen::Isometry3d T = cvMat2Eigen(result.rvec, result.tvec);
+        cout << "T = " << T.matrix() << endl;
+        //cloud = joinPointCloud(cloud, currFrame, T, camera);
+/*===========================================================================================*/
+        //vetex
+        g2o::VertexSE3* v = new g2o::VertexSE3();
+        v->setId(currIndex);
+        v->setEstimate(Eigen::Isometry3d::Identity());
+        globalOptimizer.addVertex(v);
+/*===========================================================================================*/
+        //edge
+        g2o::EdgeSE3* edge = new g2o::EdgeSE3();
+        edge->vertices()[0] = globalOptimizer.vertex(lastIndex);
+        edge->vertices()[1] = globalOptimizer.vertex(currIndex);
+        Eigen::Matrix<double, 6, 6> information = Eigen::Matrix<double, 6, 6>::Identity();
+        information(0,0) = information(1,1) = information(2,2) = information(3,3) = information(4,4) = information(5,5) = 100;
+        edge->setInformation(information);
+        edge->setMeasurement(T);
+        globalOptimizer.addEdge(edge);
+/*===========================================================================================*/
+        /*if(visualize == true)
+            viewer.showCloud(cloud);*/
+        lastFrame = currFrame;
+        lastIndex = currIndex;
+    }
+/*===========================================================================================*/
+    cout << "optimizing pose graph, vertices: " << globalOptimizer.vertices().size() << endl;
+    globalOptimizer.save("../data/result_before.g2o");
+    globalOptimizer.initializeOptimization();
+    globalOptimizer.optimize(100);
+    globalOptimizer.save("../data/result_after.g2o");
+    cout << "optimization done " << endl;
+/*===========================================================================================*/
+
+    return 0;
+}
